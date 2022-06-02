@@ -8,9 +8,12 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { aws_directoryservice as directoryservice } from 'aws-cdk-lib';
-import { aws_ec2 } from 'aws-cdk-lib';
-import {readFileSync} from 'fs';
+import { aws_ec2, aws_iam } from 'aws-cdk-lib';
+import {readFileSync, readdirSync} from 'fs';
 import { aws_datasync as datasync } from 'aws-cdk-lib';
+import { SubnetType } from 'aws-cdk-lib/aws-ec2';
+import { IpTarget } from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
+import { print } from 'util';
 
 // declare const vpc: ec2.Vpc;
 
@@ -20,34 +23,70 @@ export class NucleixCdkStack extends Stack {
     
     // Default secret
     const secret = new secretsmanager.Secret(this, 'Secret');
-    // Using the default secret
-    new iam.User(this, 'User', {
-      password: secret.secretValue,
-    });
-    // Templated secret
+
     const templatedSecret = new secretsmanager.Secret(this, 'TemplatedSecret', {
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: 'user' }),
         generateStringKey: 'password',
+        excludePunctuation: true,
       },
     });
-    // Using the templated secret
-    new iam.User(this, 'OtherUser', {
-      userName: templatedSecret.secretValueFromJson('username').toString(),
-      password: templatedSecret.secretValueFromJson('password'),
+
+    // const role = new Role(this, 'MyRole', {
+    //   assumedBy: new ServicePrincipal('sns.amazonaws.com'),
+    // });
+
+    // role.addToPolicy(new PolicyStatement({
+    //   resources: ['*'],
+    //   actions: ['lambda:InvokeFunction'],
+    // }));
+    
+    
+// const userpool = new cognito.UserPool(this, 'myuserpool', {
+//   lambdaTriggers: {
+//     postAuthentication: postAuthFn,
+//   },
+// });
+
+// // provide permissions to describe the user pool scoped to the ARN the user pool
+// postAuthFn.role?.attachInlinePolicy(new iam.Policy(this, 'userpool-policy', {
+//   statements: [new iam.PolicyStatement({
+//     actions: ['cognito-idp:DescribeUserPool'],
+//     resources: [userpool.userPoolArn],
+//   })],
+// }));
+
+    // readdirSync('./lib/').forEach(file => {
+    //   console.log(file);
+    // });
+    // 👇 load user data script
+    const userDataScript = readFileSync('lib/user_data.ps1', 'utf8');
+
+    const bamBucket =new s3.Bucket(this, 'BamBucket', {
+      versioned: true,
+      bucketName: `bambucketnucleix`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     });
 
-    
-    // 👇 load user data script
-    const userDataScript = readFileSync('./lib/user-data.sh', 'utf8');
+    // 👇 create VPC in which we'll launch the Instance
+    const vpc = new ec2.Vpc(this, 'cdk-vpc', {
+      cidr: '10.0.0.0/16',
+      natGateways: 0,
+      maxAzs: 2,
+      subnetConfiguration: [
+        {name: 'public', cidrMask: 24, subnetType: ec2.SubnetType.PUBLIC},
+      ],
+    });
 
-    // active directory
-    const cfnMicrosoftAD = new directoryservice.CfnMicrosoftAD(this, 'MyCfnMicrosoftAD', {
-      name: 'name',
-      password: 'password',
+     // active directory
+     const cfnMicrosoftAD = new directoryservice.CfnMicrosoftAD(this, 'MyCfnMicrosoftAD', {
+      name: 'nucleixAD',
+      password: templatedSecret.secretValueFromJson('password').toString(),
       vpcSettings: {
-        subnetIds: ['subnetIds'],
-        vpcId: 'vpcId',
+        subnetIds: vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds,
+        vpcId: vpc.vpcId,
       },
     
       // the properties below are optional
@@ -57,33 +96,17 @@ export class NucleixCdkStack extends Stack {
       shortName: 'shortName',
     });
 
-    const bamBucket =new s3.Bucket(this, 'BamBucket', {
-      versioned: true,
-      bucketName: `bambucketnucleix`,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-    });
-
-    // 👇 create VPC in which we'll launch the Instance
-    const vpc = new ec2.Vpc(this, 'cdk-vpc', {
-      cidr: '10.0.0.0/16',
-      natGateways: 0,
-      subnetConfiguration: [
-        {name: 'public', cidrMask: 24, subnetType: ec2.SubnetType.PUBLIC},
-      ],
-    });
-
     // The code below shows an example of how to instantiate this type.
     // The values are placeholders you should change.
     const cfnDHCPOptions = new ec2.CfnDHCPOptions(this, 'MyCfnDHCPOptions', /* all optional props */ {
-      domainName: 'domainName',
-      domainNameServers: ['domainNameServers'],
-      netbiosNameServers: ['netbiosNameServers'],
+      domainName: 'nucleixDomain',
+      domainNameServers: cfnMicrosoftAD.attrDnsIpAddresses,
+      // netbiosNameServers: ['netbiosNameServers'],
+      ntpServers: ["169.254.169.123"],
       netbiosNodeType: 123,
-      ntpServers: ['ntpServers'],
       tags: [{
         key: 'key',
-        value: 'value',
+        value: 'CfnDHCPOptions',
       }],
     });
 
@@ -154,16 +177,16 @@ export class NucleixCdkStack extends Stack {
 
     const fileSystemBam = new fsx.CfnFileSystem(this, 'MyCfnFileSystem' ,{
         fileSystemType:'WINDOWS',
-        subnetIds:['subnets'],
+        subnetIds: vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds,
         windowsConfiguration: {
-            activeDirectoryId:'directoryid',
+            activeDirectoryId: cfnMicrosoftAD.ref,
             throughputCapacity: 32,
-            preferredSubnetId:'subnets[0]',
+            preferredSubnetId:vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds[0],
             deploymentType:"MULTI_AZ_1"
           },
         storageCapacity:32,
         storageType:'HDD',
-        securityGroupIds: ['securityGroupIds'],
+        securityGroupIds: [webserverSG.securityGroupId],
         tags: [{
           key: 'Name',
           value: 'fsx1',
@@ -179,9 +202,9 @@ export class NucleixCdkStack extends Stack {
 
     // Location
     const cfnLocationS3 = new datasync.CfnLocationS3(this, 'MyCfnLocationS3', {
-      s3BucketArn: 's3BucketArn',
+      s3BucketArn: bamBucket.bucketArn,
       s3Config: {
-        bucketAccessRoleArn: 'bucketAccessRoleArn',
+        bucketAccessRoleArn: bamBucket.bucketArn//?,
       },
     
       // the properties below are optional
@@ -197,11 +220,11 @@ export class NucleixCdkStack extends Stack {
     const cfnLocationFSxWindows = new datasync.CfnLocationFSxWindows(this, 'MyCfnLocationFSxWindows', {
       fsxFilesystemArn: 'fsxFilesystemArn',
       password: 'password',
-      securityGroupArns: ['securityGroupArns'],
+      securityGroupArns: [webserverSG.securityGroupId],
       user: 'user',
     
       // the properties below are optional
-      domain: 'domain',
+      domain: 'nucleixDomain',
       subdirectory: 'subdirectory',
       tags: [{
         key: 'key',
@@ -211,8 +234,8 @@ export class NucleixCdkStack extends Stack {
 
     // datasync Task
     const cfnTask = new datasync.CfnTask(this, 'MyCfnTask', {
-      destinationLocationArn: 'destinationLocationArn',
-      sourceLocationArn: 'sourceLocationArn',
+      destinationLocationArn: cfnLocationFSxWindows.attrLocationArn,
+      sourceLocationArn: cfnLocationS3.s3BucketArn,
     
       // the properties below are optional
       cloudWatchLogGroupArn: 'cloudWatchLogGroupArn',
