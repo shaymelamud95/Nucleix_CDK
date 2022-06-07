@@ -1,70 +1,39 @@
 import { Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-// import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as cdk from 'aws-cdk-lib';
-import { aws_s3 as s3 } from 'aws-cdk-lib';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as fsx from 'aws-cdk-lib/aws-fsx';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import { aws_directoryservice as directoryservice } from 'aws-cdk-lib';
-import { aws_ec2, aws_iam } from 'aws-cdk-lib';
-import {readFileSync, readdirSync} from 'fs';
-import { aws_datasync as datasync } from 'aws-cdk-lib';
-import { SubnetType } from 'aws-cdk-lib/aws-ec2';
-import { IpTarget } from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
-import { print } from 'util';
-
-// declare const vpc: ec2.Vpc;
+import * as directoryservice from 'aws-cdk-lib/aws-directoryservice';
+import * as datasync from 'aws-cdk-lib/aws-datasync';
+import { readFileSync } from 'fs';
 
 export class NucleixCdkStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
-    
-    // Default secret
-    const secret = new secretsmanager.Secret(this, 'Secret');
 
-    const templatedSecret = new secretsmanager.Secret(this, 'TemplatedSecret', {
+    // Define variables:
+    const adDomain = "nucleix.com"
+    const adAdminUsername = "admin"
+
+    // Microsoft Active Directory Password
+    const adPassword = new secretsmanager.Secret(this, 'AWSADAdminPassword', {
+      secretName: "AWSADAdminPassword",
       generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'user' }),
+        secretStringTemplate: JSON.stringify({ domain: adDomain, username: adAdminUsername }),
         generateStringKey: 'password',
         excludePunctuation: true,
+        passwordLength: 32
       },
     });
 
-    // const role = new Role(this, 'MyRole', {
-    //   assumedBy: new ServicePrincipal('sns.amazonaws.com'),
-    // });
-
-    // role.addToPolicy(new PolicyStatement({
-    //   resources: ['*'],
-    //   actions: ['lambda:InvokeFunction'],
-    // }));
-    
-    
-// const userpool = new cognito.UserPool(this, 'myuserpool', {
-//   lambdaTriggers: {
-//     postAuthentication: postAuthFn,
-//   },
-// });
-
-// // provide permissions to describe the user pool scoped to the ARN the user pool
-// postAuthFn.role?.attachInlinePolicy(new iam.Policy(this, 'userpool-policy', {
-//   statements: [new iam.PolicyStatement({
-//     actions: ['cognito-idp:DescribeUserPool'],
-//     resources: [userpool.userPoolArn],
-//   })],
-// }));
-
-    // readdirSync('./lib/').forEach(file => {
-    //   console.log(file);
-    // });
-    // 👇 load user data script
-    const userDataScript = readFileSync('lib/user_data.ps1', 'utf8');
-
-    const bamBucket =new s3.Bucket(this, 'BamBucket', {
+    // Create S3 Bucket where BAM files will be stored
+    const bamBucket = new s3.Bucket(this, 'BamBucket', {
       versioned: true,
-      bucketName: `bambucketnucleix`,
+      bucketName: `bambucketnucleix-2204`,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -76,211 +45,199 @@ export class NucleixCdkStack extends Stack {
       natGateways: 0,
       maxAzs: 2,
       subnetConfiguration: [
-        {name: 'public', cidrMask: 24, subnetType: ec2.SubnetType.PUBLIC},
+        { name: 'public', cidrMask: 24, subnetType: ec2.SubnetType.PUBLIC },
       ],
     });
 
-     // active directory
-     const cfnMicrosoftAD = new directoryservice.CfnMicrosoftAD(this, 'MyCfnMicrosoftAD', {
-      name: 'nucleixAD',
-      password: templatedSecret.secretValueFromJson('password').toString(),
+    // Microsoft Active Directory
+    const cfnMicrosoftAD = new directoryservice.CfnMicrosoftAD(this, 'MicrosoftAD', {
+      name: 'nucleix.com',
+      password: adPassword.secretValueFromJson("password").unsafeUnwrap(),
       vpcSettings: {
-        subnetIds: vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds,
+        subnetIds: vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds,
         vpcId: vpc.vpcId,
-      },
+      }
+    });
     
-      // the properties below are optional
-      createAlias: false,
-      edition: 'edition',
-      enableSso: false,
-      shortName: 'shortName',
-    });
-
-    // The code below shows an example of how to instantiate this type.
-    // The values are placeholders you should change.
-    const cfnDHCPOptions = new ec2.CfnDHCPOptions(this, 'MyCfnDHCPOptions', /* all optional props */ {
-      domainName: 'nucleixDomain',
+    // DHCP Options
+    const cfnDHCPOptions = new ec2.CfnDHCPOptions(this, 'DHCPOptions', /* all optional props */ {
+      domainName: adDomain,
       domainNameServers: cfnMicrosoftAD.attrDnsIpAddresses,
-      // netbiosNameServers: ['netbiosNameServers'],
-      ntpServers: ["169.254.169.123"],
-      netbiosNodeType: 123,
+    });
+
+    // DHCP Options Association
+    const cfnDHCPOptionsAssociation = new ec2.CfnVPCDHCPOptionsAssociation(this, "DHCPOptionsAssociation", {
+      dhcpOptionsId: cfnDHCPOptions.attrDhcpOptionsId,
+      vpcId: vpc.vpcId
+    })
+
+    // Clients Security Group
+    const clientSG = new ec2.SecurityGroup(this, "ClientSG", {
+      vpc: vpc,
+      allowAllOutbound: true
+    })
+    clientSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3389));
+    clientSG.addIngressRule(clientSG, ec2.Port.allTraffic());
+
+    // FSx Security Group
+    const filesystemSG = new ec2.SecurityGroup(this, "FilesystemSG", {
+      vpc: vpc,
+      allowAllOutbound: true
+    })
+    filesystemSG.addIngressRule(clientSG, ec2.Port.tcp(445));
+    filesystemSG.addIngressRule(clientSG, ec2.Port.tcp(5985));
+    filesystemSG.addIngressRule(filesystemSG, ec2.Port.allTraffic());
+
+    // FSx Filesystem
+    const filesystemBam = new fsx.CfnFileSystem(this, 'FSxWindowsFilesystem', {
+      fileSystemType: 'WINDOWS',
+      subnetIds: vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds,
+      windowsConfiguration: {
+        activeDirectoryId: cfnMicrosoftAD.ref,
+        throughputCapacity: 32,
+        preferredSubnetId: vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds[0],
+        deploymentType: "MULTI_AZ_1"
+      },
+      storageCapacity: 2000,
+      storageType: 'HDD',
+      securityGroupIds: [filesystemSG.securityGroupId],
       tags: [{
-        key: 'key',
-        value: 'CfnDHCPOptions',
+        key: 'Name',
+        value: 'NucleixFSx',
       }],
-    });
+    })
 
-    // 👇 create Security Group for the Instance
-    const webserverSG = new ec2.SecurityGroup(this, 'webserver-sg', {
-      vpc,
-      allowAllOutbound: true,
-    });
-
-    // 👇 create a Role for the EC2 Instance
-    const webserverRole = new iam.Role(this, 'webserver-role', {
+    // Create instance role
+    const instanceRole = new iam.Role(this, "WindowsInstanceRole", {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonS3ReadOnlyAccess'),
-      ],
-    });
-
+      roleName: "windows-instance-role"
+    })
+    
+    // Allow role to read the secret
+    adPassword.grantRead(instanceRole)
+    
     // 👇 create the EC2 Instance
-    const ec2Instance1 = new ec2.Instance(this, 'ec2-instance1', {
+    const ec2Instance1 = new ec2.Instance(this, 'ec2-instance', {
       vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PUBLIC,
       },
-      role: webserverRole,
-      securityGroup: webserverSG,
+      securityGroup: clientSG,
       instanceType: ec2.InstanceType.of(
-        ec2.InstanceClass.BURSTABLE2,
-        ec2.InstanceSize.MICRO,
+        ec2.InstanceClass.T2,
+        ec2.InstanceSize.MEDIUM,
       ),
+      role: instanceRole,
       machineImage: new ec2.WindowsImage(ec2.WindowsVersion.WINDOWS_SERVER_2019_ENGLISH_FULL_BASE),
-      keyName: 'ec2-key-pair',
+      keyName: 'testing',
     });
 
-    const ec2Instance2 = new ec2.Instance(this, 'ec2-instance2', {
-      vpc,
-      vpcSubnets: {
-        subnetType: ec2.SubnetType.PUBLIC,
-      },
-      role: webserverRole,
-      securityGroup: webserverSG,
-      instanceType: ec2.InstanceType.of(
-        ec2.InstanceClass.BURSTABLE2,
-        ec2.InstanceSize.MICRO,
-      ),
-      machineImage: new ec2.WindowsImage(ec2.WindowsVersion.WINDOWS_SERVER_2019_ENGLISH_FULL_BASE),
-      keyName: 'ec2-key-pair',
-    });
-
-    // const ec2Instance3 = new ec2.Instance(this, 'ec2-instance3', {
-    //   vpc,
-    //   vpcSubnets: {
-    //     subnetType: ec2.SubnetType.PUBLIC,
-    //   },
-    //   role: webserverRole,
-    //   securityGroup: webserverSG,
-    //   instanceType: ec2.InstanceType.of(
-    //     ec2.InstanceClass.BURSTABLE2,
-    //     ec2.InstanceSize.MICRO,
-    //   ),
-    //   machineImage: new ec2.WindowsImage(ec2.WindowsVersion.WINDOWS_SERVER_2019_ENGLISH_FULL_BASE),
-    //   keyName: 'ec2-key-pair',
-    // });
+    // 👇 load user data script
+    const userDataScript = readFileSync('lib/user_data.ps1', 'utf8');
 
     // 👇 add user data to the EC2 instance
     ec2Instance1.addUserData(userDataScript);
-    ec2Instance2.addUserData(userDataScript);
-    // ec2Instance3.addUserData(userDataScript);
 
-    const fileSystemBam = new fsx.CfnFileSystem(this, 'MyCfnFileSystem' ,{
-        fileSystemType:'WINDOWS',
-        subnetIds: vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds,
-        windowsConfiguration: {
-            activeDirectoryId: cfnMicrosoftAD.ref,
-            throughputCapacity: 32,
-            preferredSubnetId:vpc.selectSubnets({subnetType:SubnetType.PUBLIC}).subnetIds[0],
-            deploymentType:"MULTI_AZ_1"
-          },
-        storageCapacity:32,
-        storageType:'HDD',
-        securityGroupIds: [webserverSG.securityGroupId],
-        tags: [{
-          key: 'Name',
-          value: 'fsx1',
-        }],
-      })
+    // Create Datasync Role
+    const datasyncS3Role = new iam.Role(this, "S3DatasyncRole", {
+      assumedBy: new iam.ServicePrincipal('datasync.amazonaws.com'),
+      roleName: "datasync-s3"
+    });
 
-    // const metrixBucket =new s3.Bucket(this, 'MetrixBucket', {
-    //   versioned: true,
-    //   bucketName: `metrixbucketnucleix`,
-    //   removalPolicy: cdk.RemovalPolicy.DESTROY,
-    //   autoDeleteObjects: true,
-    // });
+    // Grant permissions for the datasync role to Read/Write/Put from the S3 Bucket
+    bamBucket.grantReadWrite(datasyncS3Role);
+    bamBucket.grantPut(datasyncS3Role);
 
-    // Location
-    const cfnLocationS3 = new datasync.CfnLocationS3(this, 'MyCfnLocationS3', {
+    // S3 Source Location
+    const s3SourceLocation = new datasync.CfnLocationS3(this, 'S3SourceLocation', {
       s3BucketArn: bamBucket.bucketArn,
       s3Config: {
-        bucketAccessRoleArn: bamBucket.bucketArn//?,
+        bucketAccessRoleArn: datasyncS3Role.roleArn
       },
-    
-      // the properties below are optional
-      s3StorageClass: 's3StorageClass',
-      subdirectory: 'subdirectory',
+      subdirectory: 'source',
       tags: [{
-        key: 'key',
-        value: 'value',
+        key: 'Name',
+        value: 's3-source-location',
       }],
     });
 
-    //LocationFSxWindows 
-    const cfnLocationFSxWindows = new datasync.CfnLocationFSxWindows(this, 'MyCfnLocationFSxWindows', {
-      fsxFilesystemArn: 'fsxFilesystemArn',
-      password: 'password',
-      securityGroupArns: [webserverSG.securityGroupId],
-      user: 'user',
-    
-      // the properties below are optional
-      domain: 'nucleixDomain',
-      subdirectory: 'subdirectory',
+    // S3 Destination Location
+    const s3DestinationLocation = new datasync.CfnLocationS3(this, 'S3DestinationLocation', {
+      s3BucketArn: bamBucket.bucketArn,
+      s3Config: {
+        bucketAccessRoleArn: datasyncS3Role.roleArn
+      },
+      subdirectory: 'destination',
       tags: [{
-        key: 'key',
-        value: 'value',
+        key: 'Name',
+        value: 's3-destination-location',
       }],
     });
 
-    // datasync Task
-    const cfnTask = new datasync.CfnTask(this, 'MyCfnTask', {
-      destinationLocationArn: cfnLocationFSxWindows.attrLocationArn,
-      sourceLocationArn: cfnLocationS3.s3BucketArn,
-    
-      // the properties below are optional
-      cloudWatchLogGroupArn: 'cloudWatchLogGroupArn',
-      excludes: [{
-        filterType: 'filterType',
-        value: 'value',
+    // Get current Region and Account ID to construct FSx ARN as it does not have a property that returns it
+    const region = cdk.Stack.of(this).region
+    const accountId = cdk.Stack.of(this).account
+
+    // FSx location 
+    const fsxLocation = new datasync.CfnLocationFSxWindows(this, 'FSxLocation', {
+      fsxFilesystemArn: `arn:aws:fsx:${region}:${accountId}:file-system/${filesystemBam.ref}`,
+      securityGroupArns: [clientSG.securityGroupId],
+      user: `${adAdminUsername}@${adDomain}`,
+      password: adPassword.secretValueFromJson("password").unsafeUnwrap(),
+      domain: adDomain,
+      subdirectory: 'share',
+      tags: [{
+        key: 'Name',
+        value: 'fsx-share-location',
       }],
-      includes: [{
-        filterType: 'filterType',
-        value: 'value',
-      }],
-      name: 'name',
+    });
+
+    const datasyncLogGroup = new logs.LogGroup(this, "DatasyncLogGroup", {
+      retention: 7,
+      logGroupName: "datasync/logs"
+    })
+
+    // Datasync Tasks
+
+    // S3 to FSx
+    const s3ToFSx = new datasync.CfnTask(this, 'S3ToFSx', {
+      destinationLocationArn: fsxLocation.attrLocationArn,
+      sourceLocationArn: s3SourceLocation.s3BucketArn,
+      cloudWatchLogGroupArn: datasyncLogGroup.logGroupArn,
+      name: 's3-to-fsx',
       options: {
-        atime: 'atime',
-        bytesPerSecond: 123,
-        gid: 'gid',
-        logLevel: 'logLevel',
-        mtime: 'mtime',
-        overwriteMode: 'overwriteMode',
-        posixPermissions: 'posixPermissions',
-        preserveDeletedFiles: 'preserveDeletedFiles',
-        preserveDevices: 'preserveDevices',
-        securityDescriptorCopyFlags: 'securityDescriptorCopyFlags',
-        taskQueueing: 'taskQueueing',
-        transferMode: 'transferMode',
-        uid: 'uid',
-        verifyMode: 'verifyMode',
-      },
-      schedule: {
-        scheduleExpression: 'scheduleExpression',
+        transferMode: 'ALL',
+        verifyMode: 'ONLY_FILES_TRANSFERRED',
       },
       tags: [{
-        key: 'key',
-        value: 'value',
+        key: 'Name',
+        value: 's3-to-fsx',
+      }],
+    });
+
+    // FSx to S3
+    const fsxToS3 = new datasync.CfnTask(this, 'FSxToS3', {
+      destinationLocationArn: s3SourceLocation.s3BucketArn,
+      sourceLocationArn: fsxLocation.attrLocationArn,
+      cloudWatchLogGroupArn: datasyncLogGroup.logGroupArn,
+      name: 'fsx-to-s3',
+      options: {
+        transferMode: 'ALL',
+        verifyMode: 'ONLY_FILES_TRANSFERRED',
+      },
+      tags: [{
+        key: 'Name',
+        value: 'fsx-to-s3',
       }],
     });
 
     // Defining the order of the CDK Deployment
-    secret.node.addDependency(vpc);
-    cfnMicrosoftAD.node.addDependency(secret);
-    fileSystemBam.node.addDependency(cfnMicrosoftAD);
+    cfnMicrosoftAD.node.addDependency(adPassword, vpc);
     cfnDHCPOptions.node.addDependency(cfnMicrosoftAD);
-    secret.node.addDependency(cfnDHCPOptions);
-    // ec2Instance1.node.addDependency(set_dhcp_option_to_vpc);
-    // ec2Instance1.node.addDependency(set_dhcp_option_to_vpc);
-    // ec2Instance1.node.addDependency(set_dhcp_option_to_vpc);
+    filesystemBam.node.addDependency(cfnMicrosoftAD);
+    ec2Instance1.node.addDependency(cfnMicrosoftAD, filesystemBam);
+    s3SourceLocation.node.addDependency(bamBucket);
+    s3DestinationLocation.node.addDependency(bamBucket);
+    fsxLocation.node.addDependency(filesystemBam)
   }
 }
