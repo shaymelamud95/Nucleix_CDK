@@ -32,9 +32,18 @@ export class NucleixCdkStack extends Stack {
     });
 
     // Create S3 Bucket where BAM files will be stored
-    const bamBucket = new s3.Bucket(this, 'BamBucket', {
+    const bamBucket = new s3.Bucket(this, 'bamBucket', {
       versioned: true,
-      bucketName: `bambucketnucleix-2204`,
+      bucketName: `bambucketnucleix-2206`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+
+    // Create S3 Bucket where BAM files will be stored
+    const linksbucket = new s3.Bucket(this, 'linksbucket', {
+      versioned: true,
+      bucketName: `linksbucketnucleix-02`,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -130,7 +139,7 @@ export class NucleixCdkStack extends Stack {
       ),
       role: instanceRole,
       machineImage: new ec2.WindowsImage(ec2.WindowsVersion.WINDOWS_SERVER_2019_ENGLISH_FULL_BASE),
-      keyName: 'testing',
+      keyName: 'shay',
     });
 
     // 👇 load user data script
@@ -213,7 +222,7 @@ export class NucleixCdkStack extends Stack {
     });
 
     // Lambda function
-    const triggerDatasync = new lambda.Function(this, 'triggerDatasync', {
+    const lambdaTriggerDatasync = new lambda.Function(this, 'triggerDatasync', {
       runtime: lambda.Runtime.PYTHON_3_8,
       code: lambda.Code.fromAsset('lambda-datasync'),
       handler: 'lambda_function.lambda_handler',
@@ -222,12 +231,16 @@ export class NucleixCdkStack extends Stack {
         DATASYNC_TASK_ARN: s3ToFSx.ref,
       }
     });
+    
+    // Add Create Event only for files in input folder
+        linksbucket.addEventNotification(s3.EventType.OBJECT_CREATED_PUT,
+          new cdk.aws_s3_notifications.LambdaDestination(lambdaTriggerDatasync),{prefix: '/input'});
 
     // Grant permissions to the Lambda function to read the S3 Bucket
-    bamBucket.grantRead(triggerDatasync);
+    bamBucket.grantRead(lambdaTriggerDatasync);
 
     // Grant permissions to the Lambda function to invoke the Datasync Task
-    triggerDatasync.addToRolePolicy(new iam.PolicyStatement({
+    lambdaTriggerDatasync.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         "datasync:DescribeTaskExecution",
@@ -243,7 +256,7 @@ export class NucleixCdkStack extends Stack {
     }));
 
     // Grant permissions to the Lambda function to get objects from the links s3 bucket
-    triggerDatasync.addToRolePolicy(new iam.PolicyStatement({
+    lambdaTriggerDatasync.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         "s3:GetBucket*",
@@ -263,6 +276,6 @@ export class NucleixCdkStack extends Stack {
     s3DestinationLocation.node.addDependency(bamBucket);
     fsxLocation.node.addDependency(filesystemBam)
     s3ToFSx.node.addDependency(s3SourceLocation, fsxLocation);
-    triggerDatasync.node.addDependency(s3ToFSx);
+    lambdaTriggerDatasync.node.addDependency(s3ToFSx);
   }
 }
