@@ -9,6 +9,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as directoryservice from 'aws-cdk-lib/aws-directoryservice';
 import * as datasync from 'aws-cdk-lib/aws-datasync';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { readFileSync } from 'fs';
 
 export class NucleixCdkStack extends Stack {
@@ -58,7 +59,7 @@ export class NucleixCdkStack extends Stack {
         vpcId: vpc.vpcId,
       }
     });
-    
+
     // DHCP Options
     const cfnDHCPOptions = new ec2.CfnDHCPOptions(this, 'DHCPOptions', /* all optional props */ {
       domainName: adDomain,
@@ -112,10 +113,10 @@ export class NucleixCdkStack extends Stack {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       roleName: "windows-instance-role"
     })
-    
+
     // Allow role to read the secret
     adPassword.grantRead(instanceRole)
-    
+
     // 👇 create the EC2 Instance
     const ec2Instance1 = new ec2.Instance(this, 'ec2-instance', {
       vpc,
@@ -154,7 +155,6 @@ export class NucleixCdkStack extends Stack {
       s3Config: {
         bucketAccessRoleArn: datasyncS3Role.roleArn
       },
-      subdirectory: 'source',
       tags: [{
         key: 'Name',
         value: 's3-source-location',
@@ -181,10 +181,9 @@ export class NucleixCdkStack extends Stack {
     // FSx location 
     const fsxLocation = new datasync.CfnLocationFSxWindows(this, 'FSxLocation', {
       fsxFilesystemArn: `arn:aws:fsx:${region}:${accountId}:file-system/${filesystemBam.ref}`,
-      securityGroupArns: [clientSG.securityGroupId],
+      securityGroupArns: [`arn:aws:ec2:${region}:${accountId}:security-group/${clientSG.securityGroupId}`],
       user: `${adAdminUsername}@${adDomain}`,
       password: adPassword.secretValueFromJson("password").unsafeUnwrap(),
-      domain: adDomain,
       subdirectory: 'share',
       tags: [{
         key: 'Name',
@@ -197,12 +196,10 @@ export class NucleixCdkStack extends Stack {
       logGroupName: "datasync/logs"
     })
 
-    // Datasync Tasks
-
-    // S3 to FSx
+    // Datasync Task S3 to FSx
     const s3ToFSx = new datasync.CfnTask(this, 'S3ToFSx', {
-      destinationLocationArn: fsxLocation.attrLocationArn,
-      sourceLocationArn: s3SourceLocation.s3BucketArn,
+      destinationLocationArn: fsxLocation.ref,
+      sourceLocationArn: s3SourceLocation.ref,
       cloudWatchLogGroupArn: datasyncLogGroup.logGroupArn,
       name: 's3-to-fsx',
       options: {
@@ -215,21 +212,47 @@ export class NucleixCdkStack extends Stack {
       }],
     });
 
-    // FSx to S3
-    const fsxToS3 = new datasync.CfnTask(this, 'FSxToS3', {
-      destinationLocationArn: s3SourceLocation.s3BucketArn,
-      sourceLocationArn: fsxLocation.attrLocationArn,
-      cloudWatchLogGroupArn: datasyncLogGroup.logGroupArn,
-      name: 'fsx-to-s3',
-      options: {
-        transferMode: 'ALL',
-        verifyMode: 'ONLY_FILES_TRANSFERRED',
-      },
-      tags: [{
-        key: 'Name',
-        value: 'fsx-to-s3',
-      }],
+    // Lambda function
+    const triggerDatasync = new lambda.Function(this, 'triggerDatasync', {
+      runtime: lambda.Runtime.PYTHON_3_8,
+      code: lambda.Code.fromAsset('lambda-datasync'),
+      handler: 'lambda_function.lambda_handler',
+      environment: {
+        BAM_FILES_BUCKET: bamBucket.bucketName,
+        DATASYNC_TASK_ARN: s3ToFSx.ref,
+      }
     });
+
+    // Grant permissions to the Lambda function to read the S3 Bucket
+    bamBucket.grantRead(triggerDatasync);
+
+    // Grant permissions to the Lambda function to invoke the Datasync Task
+    triggerDatasync.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        "datasync:DescribeTaskExecution",
+        "datasync:ListTaskExecutions",
+        "datasync:DescribeTask",
+        "datasync:ListTasks",
+        "datasync:UpdateTaskExecution",
+        "ec2:DescribeNetworkInterfaces",
+        "datasync:StartTaskExecution",
+        "fsx:DescribeFileSystems"
+      ],
+      resources: ["*"]
+    }));
+
+    // Grant permissions to the Lambda function to get objects from the links s3 bucket
+    triggerDatasync.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        "s3:GetBucket*",
+        "s3:GetObject*",
+        "s3:List*",
+        "s3:PutObject*"
+      ],
+      resources: ["arn:aws:s3:::sela-datasync-poc-bucket", "arn:aws:s3:::sela-datasync-poc-bucket/*"]
+    }));
 
     // Defining the order of the CDK Deployment
     cfnMicrosoftAD.node.addDependency(adPassword, vpc);
@@ -239,5 +262,7 @@ export class NucleixCdkStack extends Stack {
     s3SourceLocation.node.addDependency(bamBucket);
     s3DestinationLocation.node.addDependency(bamBucket);
     fsxLocation.node.addDependency(filesystemBam)
+    s3ToFSx.node.addDependency(s3SourceLocation, fsxLocation);
+    triggerDatasync.node.addDependency(s3ToFSx);
   }
 }
