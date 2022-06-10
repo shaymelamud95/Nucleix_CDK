@@ -11,5 +11,7 @@ $SecretObj = Get-SECSecretValue -SecretId $SecretAD
 $password   = $Secret.password | ConvertTo-SecureString -asPlainText -Force
 $username   = $Secret.username + "@" + $Secret.domain
 $credential = New-Object System.Management.Automation.PSCredential($username,$password)
+# net use w: \\nucleix.com\share /user:admin 9h7HYIK2I74R7JgET4VelGbWQuIr015a
+net use w: \\$\share /user:$Secret.username $Secret.password
 Add-Computer -DomainName $Secret.Domain -Credential $credential -Restart -Force
 </powershell>

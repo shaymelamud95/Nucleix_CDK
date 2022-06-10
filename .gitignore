@@ -9,3 +9,6 @@ cdk.out
 
 # Lambda
 **/.venv
+
+# test
+/iam_policies*

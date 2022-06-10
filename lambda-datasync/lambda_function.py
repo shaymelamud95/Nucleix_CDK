@@ -22,17 +22,15 @@ def lambda_handler(event, context):
             "Received invalid event - unable to locate Object key to upload.", event
         )
 
-    # Download the file from S3 to a local file.
+    # get the file from S3 to a local file.
     links_bucket = event["Records"][0]["s3"]["bucket"]["name"]
-    print(f"Downloading file from {links_bucket}: {objectKey}")
-    s3.download_file(links_bucket, objectKey, f"/tmp/linksfile.txt")
-
-    # Read the contents of the file into a variable
-    with open(f"/tmp/linksfile.txt", "r") as f:
-        links_file = f.read()
-
-    # Take each line of the file into an array
-    links = links_file.splitlines()
+    print(f"get file from {links_bucket}: {objectKey}")
+    content =s3.get_object(Bucket = links_bucket,Key = objectKey)
+    print(f"content: {content['Body'].read()}")
+    links = []
+    for line in content:
+        links.append(line.decode("utf-8"))    
+    print(f"links from links_bucket: {links}")
 
     # Define array to store the links that were not found in the S3 bucket
     links_not_found = []
