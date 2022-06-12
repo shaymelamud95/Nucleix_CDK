@@ -75,6 +75,7 @@ export class NucleixCdkStack extends Stack {
             .subnetIds,
           vpcId: vpc.vpcId,
         },
+        edition: 'Standard'
       }
     );
 
