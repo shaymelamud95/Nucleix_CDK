@@ -44,7 +44,7 @@ export class NucleixCdkStack extends Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     });
 
-    // Create S3 Bucket where BAM files will be stored
+    // Create S3 Bucket where links will be stored
     const linksbucket = new s3.Bucket(this, "linksbucket", {
       versioned: true,
       bucketName: `linksbucketnucleix-02`,
