@@ -161,7 +161,7 @@ export class NucleixCdkStack extends Stack {
     adPassword.grantRead(instanceRole);
 
     // 👇 create the EC2 Instance
-    const ec2Instance1 = new ec2.Instance(this, "ec2-instance", {
+    const ec2Instance1 = new ec2.Instance(this, "ec2-instance-03", {
       vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PUBLIC,
