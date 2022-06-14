@@ -74,8 +74,8 @@ export class NucleixCdkStack extends Stack {
           subnetIds: vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC })
             .subnetIds,
           vpcId: vpc.vpcId,
-        },
-        edition: 'Standard'
+        }
+        // edition: 'Standard'
       }
     );
 
@@ -184,6 +184,11 @@ export class NucleixCdkStack extends Stack {
 
     // 👇 add user data to the EC2 instance
     ec2Instance1.addUserData(userDataScript);
+
+    // const domainJoinDocument = ssm.StringParameter.valueForStringParameter(this, '/acme/cdk/ec2/app-mysql/domainJoinDocument');
+    // ec2.CloudFormationInit.fromElements(
+    //   ec2.InitCommand.shellCommand('powershell.exe -Command Send-SSMCommand -InstanceId (Invoke-WebRequest http://169.254.169.254/latest/meta-data/instance-id -UseBasicParsing).Content -DocumentName ' + domainJoinDocument + ' -TimeoutSecond 600 -Region ' + process.env.CDK_DEFAULT_REGION, { key: "6-DomainJoinServer", waitAfterCompletion: ec2.InitCommandWaitDuration.of(cdk.Duration.seconds(60)) }),
+    // );
 
     // Create Datasync Role
     const datasyncS3Role = new iam.Role(this, "S3DatasyncRole", {
